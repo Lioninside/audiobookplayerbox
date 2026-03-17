@@ -30,10 +30,10 @@ POS_DIR                = "/home/radonthusis/.audiobook_positions"
 LOG_FILE               = "/home/radonthusis/audiobook_player.log"
 
 POSITION_SAVE_INTERVAL = 10.0    # seconds between autosave during playback
-JUMP_SECONDS           = 60      # seek step size
-BLACK_LONG_SEC         = 3.0     # hold time for long-press reboot
-DEBOUNCE_SEC           = 0.08    # per-edge debounce
-BTN_COOLDOWN           = 0.20    # minimum gap between actions on the same button
+JUMP_SECONDS           = 60      # seek step size in seconds
+BLACK_LONG_SEC         = 3.0     # hold duration threshold for reboot
+DEBOUNCE_SEC           = 0.08    # per-edge debounce window
+BTN_COOLDOWN           = 0.20    # minimum gap between fired actions per button
 LOOP_SLEEP             = 0.010   # main-loop sleep (~100 Hz)
 
 BTN_PLAY = 0
@@ -42,7 +42,7 @@ BTN_BACK = 2
 BTN_NEXT = 3
 BTN_BLK  = 4
 
-# ── Headless SDL (no display, pygame used only for joystick) ──────────────────
+# ── Headless SDL — pygame is used only for joystick, not for audio ────────────
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -52,9 +52,12 @@ try:
 except Exception:
     pass
 
-os.makedirs(POS_DIR, exist_ok=True)
-
 # ── Logging ───────────────────────────────────────────────────────────────────
+
+try:
+    os.makedirs(POS_DIR, exist_ok=True)
+except Exception as exc:
+    print(f"WARNING: could not create POS_DIR {POS_DIR}: {exc}", file=sys.stderr)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,14 +69,15 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Late imports (require hardware libs) ─────────────────────────────────────
+# ── Hardware imports ──────────────────────────────────────────────────────────
 
 import pygame
 import vlc
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def atomic_write(path: str, text: str):
+def atomic_write(path: str, text: str) -> None:
+    """Write text to path via a temp file so a crash never leaves a partial file."""
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write(text)
@@ -85,6 +89,10 @@ def atomic_write(path: str, text: str):
 class AudiobookPlayer:
 
     def __init__(self):
+        # Lock protecting self.player, self.idx, self.ended, self.paused.
+        # Acquired by any thread that reads or writes these fields together.
+        self._lock = threading.Lock()
+
         self.books: list[str] = self._scan_books()
         if not self.books:
             log.error(f"No MP3 files found in {AUDIOBOOKS_DIR}")
@@ -95,11 +103,12 @@ class AudiobookPlayer:
         self.ended    = False
         self.length_s = 0.0
 
-        # VLC — dedicated instance, ALSA output
-        self._vlc = vlc.Instance("--no-xlib", "--aout=alsa", "--file-caching=3000")
-        self.player: vlc.MediaPlayer = None
+        # One persistent VLC instance; individual MediaPlayer objects are
+        # created per book and explicitly released when done.
+        self._vlc    = vlc.Instance("--no-xlib", "--aout=alsa", "--file-caching=3000")
+        self.player: vlc.MediaPlayer | None = None
 
-        # Joystick via pygame (display not needed)
+        # Joystick — pygame is initialised only for input, not for audio
         pygame.init()
         pygame.joystick.init()
         if pygame.joystick.get_count() == 0:
@@ -110,16 +119,15 @@ class AudiobookPlayer:
         nbtn = self.joy.get_numbuttons()
         log.info(f"Controller: '{self.joy.get_name()}' | {nbtn} button(s)")
 
-        # Per-button tracking arrays
-        self._btn_prev = [0]   * nbtn   # last raw state
-        self._btn_edge = [0.0] * nbtn   # timestamp of last state change
+        # Per-button tracking (indexed by joystick button number)
+        self._btn_prev = [0]   * nbtn   # last confirmed raw state
+        self._btn_edge = [0.0] * nbtn   # timestamp of last processed edge
         self._btn_fire = [0.0] * nbtn   # timestamp of last fired action
         self._btn_down = [0.0] * nbtn   # timestamp of last DOWN event
 
-        # Autosave thread
+        # Autosave runs in a daemon thread so it dies with the main process
         threading.Thread(target=self._autosave_loop, daemon=True, name="autosave").start()
 
-        # Restore last book + load it (paused)
         self.idx = self._restore_index()
         self._load_book(self.idx, start_paused=True)
         log.info("Ready — press GREEN to play")
@@ -147,11 +155,13 @@ class AudiobookPlayer:
         except Exception:
             return 0
 
-    def _save_index(self):
+    def _save_index(self) -> None:
         atomic_write(self._index_file(), str(self.idx))
 
-    def _save_pos(self):
-        if not self.player:
+    def _save_pos(self) -> None:
+        """Save current VLC playback position. Call only from main thread or
+        with self._lock already held by the caller."""
+        if self.player is None:
             return
         ms = self.player.get_time()
         if ms is None or ms < 0:
@@ -165,7 +175,7 @@ class AudiobookPlayer:
         except Exception:
             return 0.0
 
-    def _reset_all_positions(self):
+    def _reset_all_positions(self) -> None:
         count = 0
         for f in glob.glob(os.path.join(POS_DIR, "*.pos")):
             try:
@@ -175,143 +185,186 @@ class AudiobookPlayer:
                 log.warning(f"Could not remove {f}: {e}")
         log.info(f"Reset {count} position file(s)")
 
-    def _autosave_loop(self):
+    def _autosave_loop(self) -> None:
+        """Periodic position save. Runs in a daemon thread."""
         while True:
             time.sleep(POSITION_SAVE_INTERVAL)
-            if not self.paused:
-                self._save_pos()
+            with self._lock:
+                # Only save during active playback — not paused, not ended.
+                if not self.paused and not self.ended:
+                    self._save_pos()
 
     # ── Book loading ──────────────────────────────────────────────────────────
 
-    def _load_book(self, index: int, start_paused: bool):
-        if self.player:
-            try:
-                self._save_pos()
-                self.player.stop()
-            except Exception:
-                pass
+    def _load_book(self, index: int, start_paused: bool) -> None:
+        """Stop any current playback, load a new book, and optionally start it."""
+        with self._lock:
+            # ── Tear down old player ──────────────────────────────────────────
+            if self.player is not None:
+                try:
+                    self._save_pos()
+                    self.player.stop()
+                except Exception:
+                    pass
+                try:
+                    # Bug fix: release the native VLC handle to avoid a leak.
+                    self.player.release()
+                except Exception:
+                    pass
+                self.player = None
 
-        self.books = self._scan_books()
-        if not self.books:
-            log.error("No books found")
-            return
+            # Refresh book list in case files changed on disk
+            self.books = self._scan_books()
+            if not self.books:
+                log.error("No books found on disk")
+                return
 
-        self.idx  = index % len(self.books)
-        path      = self.books[self.idx]
-        last_s    = self._load_pos(path)
+            self.idx    = index % len(self.books)
+            path        = self.books[self.idx]
+            last_s      = self._load_pos(path)
+            self.ended  = False
+            self.paused = start_paused
 
-        self.player = self._vlc.media_player_new()
-        m = self._vlc.media_new(path)
-        m.add_option(":input-fast-seek")
-        m.add_option(":file-caching=3000")
-        self.player.set_media(m)
+            # ── Set up new player ─────────────────────────────────────────────
+            self.player = self._vlc.media_player_new()
+            m = self._vlc.media_new(path)
+            m.add_option(":input-fast-seek")
+            m.add_option(":file-caching=3000")
+            self.player.set_media(m)
 
-        em = self.player.event_manager()
-        em.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end)
+            em = self.player.event_manager()
+            em.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end)
 
-        self.player.play()
+            # VLC must start playing before we can seek; we mute briefly to
+            # avoid a click if we immediately pause afterward.
+            self.player.audio_set_volume(0)
+            self.player.play()
 
-        # Wait until VLC is ready before seeking
-        for _ in range(40):
-            if self.player.get_state() in (vlc.State.Playing, vlc.State.Paused):
-                break
-            time.sleep(0.05)
+            # Wait up to 2 s for the player to become ready
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                state = self.player.get_state()
+                if state in (vlc.State.Playing, vlc.State.Paused):
+                    break
+                if state == vlc.State.Error:
+                    log.error(f"VLC error opening: {path}")
+                    return
+                time.sleep(0.05)
+            else:
+                log.error(f"VLC timed out opening: {path}")
+                return
 
-        self.player.set_time(int(last_s * 1000))
+            if last_s > 0:
+                self.player.set_time(int(last_s * 1000))
 
-        if start_paused:
-            self.player.pause()
-            self.paused = True
-        else:
-            self.paused = False
+            if start_paused:
+                self.player.pause()
+            # else: already playing
 
-        self.ended = False
-
-        try:
-            from mutagen.mp3 import MP3
-            self.length_s = MP3(path).info.length
-        except Exception:
-            raw = self.player.get_length()
-            self.length_s = raw / 1000.0 if raw and raw > 0 else 0.0
-
-        try:
             self.player.audio_set_volume(100)
-        except Exception:
-            pass
 
-        self._save_index()
-        log.info(f"Book: {Path(path).name} | pos={last_s:.1f}s | len={self.length_s:.1f}s")
+            # Measure duration via mutagen (file header, not VLC stream probe)
+            try:
+                from mutagen.mp3 import MP3
+                self.length_s = MP3(path).info.length
+            except Exception:
+                raw = self.player.get_length()
+                self.length_s = raw / 1000.0 if raw and raw > 0 else 0.0
 
-    def _on_end(self, _event):
-        try:
-            self._save_pos()
-        except Exception:
-            pass
-        self.ended  = True
-        self.paused = False
+            self._save_index()
+            log.info(
+                f"Book: {Path(path).name} | "
+                f"pos={last_s:.1f}s | len={self.length_s:.1f}s | "
+                f"{'paused' if start_paused else 'playing'}"
+            )
+
+    # ── VLC end-of-media callback (runs on a VLC internal thread) ─────────────
+
+    def _on_end(self, _event) -> None:
+        with self._lock:
+            if self.player is None:
+                return
+            # Bug fix: do NOT save the current position here.
+            # At EndReached, get_time() returns the total duration.
+            # Saving that would cause the next load to seek to the very end
+            # and immediately trigger EndReached again → infinite loop.
+            # Instead, overwrite with 0 so the next play starts from the top.
+            atomic_write(self._pos_file(self.books[self.idx]), "0.000")
+            self.ended  = True
+            self.paused = False
         log.info(f"Finished: {Path(self.books[self.idx]).name}")
 
-    # ── Playback actions ──────────────────────────────────────────────────────
+    # ── Playback actions (called from main thread only) ───────────────────────
 
-    def _toggle_play(self):
-        if not self.player:
-            return
+    def _toggle_play(self) -> None:
+        with self._lock:
+            if self.player is None:
+                return
+            if self.ended:
+                # Bug fix: cannot resume a VLC player in State.Ended via
+                # set_time()+play() — the player is exhausted. Reload the media.
+                # _load_book acquires the same lock, so release first.
+                idx = self.idx
         if self.ended:
-            self.player.set_time(0)
-            self.player.play()
-            self.paused = False
-            self.ended  = False
-            log.info("Restarting from beginning")
+            # ended=True path: reload book from beginning
+            self._load_book(idx, start_paused=False)
             return
-        if self.paused:
-            self.player.play()
-            self.paused = False
-            log.info("Play")
-        else:
-            self.player.pause()
-            self.paused = True
+
+        with self._lock:
+            if self.paused:
+                self.player.play()
+                self.paused = False
+                log.info("Play")
+            else:
+                self.player.pause()
+                self.paused = True
+                self._save_pos()
+                log.info("Pause")
+
+    def _seek(self, delta_s: int) -> None:
+        with self._lock:
+            # Bug fix: seeking on an ended player is a silent no-op in VLC;
+            # guard here to avoid confusing log entries and state corruption.
+            if self.player is None or self.ended:
+                return
+            cur_ms = self.player.get_time() or 0
+            max_ms = (
+                int(self.length_s * 1000) if self.length_s > 0
+                else (self.player.get_length() or 0)
+            )
+            tgt_ms = max(0, cur_ms + delta_s * 1000)
+            if max_ms > 0:
+                tgt_ms = min(tgt_ms, max(0, max_ms - 250))
+            was_playing = (self.player.get_state() == vlc.State.Playing)
+            self.player.set_time(tgt_ms)
             self._save_pos()
-            log.info("Pause")
+            # After set_time, VLC may briefly stall; restore state explicitly.
+            if was_playing:
+                self.player.play()
+                self.paused = False
+            else:
+                self.player.pause()
+                self.paused = True
+            log.info(f"Seek {delta_s:+d}s → {tgt_ms / 1000.0:.1f}s")
 
-    def _seek(self, delta_s: int):
-        if not self.player:
-            return
-        cur_ms = self.player.get_time() or 0
-        if self.length_s > 0:
-            max_ms = int(self.length_s * 1000)
-        else:
-            raw = self.player.get_length()
-            max_ms = raw if raw and raw > 0 else 0
-        tgt_ms = max(0, cur_ms + delta_s * 1000)
-        if max_ms > 0:
-            tgt_ms = min(tgt_ms, max(0, max_ms - 250))
-        was_playing = (self.player.get_state() == vlc.State.Playing)
-        self.player.set_time(tgt_ms)
-        self._save_pos()
-        if was_playing:
-            self.player.play()
-            self.paused = False
-        else:
-            self.player.pause()
-            self.paused = True
-        log.info(f"Seek {delta_s:+d}s → {tgt_ms / 1000.0:.1f}s")
-
-    def _next_book(self):
-        was_playing = not self.paused
-        self._save_pos()
-        self._load_book((self.idx + 1) % len(self.books), start_paused=not was_playing)
+    def _next_book(self) -> None:
+        with self._lock:
+            was_playing = not self.paused
+            idx = (self.idx + 1) % len(self.books)
+        self._load_book(idx, start_paused=not was_playing)
         log.info("Next book")
 
-    def _reboot(self):
+    def _reboot(self) -> None:
         log.info("Rebooting…")
-        self._save_pos()
+        with self._lock:
+            self._save_pos()
         rc = os.system("sudo /sbin/reboot")
         if rc != 0:
-            log.error(f"Reboot failed (rc={rc}) — check sudoers")
+            log.error(f"Reboot command failed (rc={rc}) — check sudoers")
 
     # ── Button polling (~100 Hz) ──────────────────────────────────────────────
 
-    def _poll_buttons(self):
+    def _poll_buttons(self) -> None:
         now = time.time()
         pygame.event.pump()
 
@@ -322,7 +375,7 @@ class AudiobookPlayer:
             if cur == prev:
                 continue
 
-            # Edge detected — apply debounce
+            # Edge detected — only act if outside the debounce window
             if now - self._btn_edge[btn] < DEBOUNCE_SEC:
                 self._btn_prev[btn] = cur
                 continue
@@ -336,21 +389,21 @@ class AudiobookPlayer:
                 if now - self._btn_fire[btn] < BTN_COOLDOWN:
                     continue
                 if btn == BTN_PLAY:
-                    self._toggle_play();   self._btn_fire[btn] = now
+                    self._toggle_play();        self._btn_fire[btn] = now
                 elif btn == BTN_FWD:
-                    self._seek(+JUMP_SECONDS); self._btn_fire[btn] = now
+                    self._seek(+JUMP_SECONDS);  self._btn_fire[btn] = now
                 elif btn == BTN_BACK:
-                    self._seek(-JUMP_SECONDS); self._btn_fire[btn] = now
+                    self._seek(-JUMP_SECONDS);  self._btn_fire[btn] = now
                 elif btn == BTN_NEXT:
-                    self._next_book();     self._btn_fire[btn] = now
-                # BTN_BLK: decision deferred to UP
+                    self._next_book();          self._btn_fire[btn] = now
+                # BTN_BLK: decision deferred to release
 
             else:
                 # ── UP ────────────────────────────────────────────────────────
                 if btn == BTN_BLK:
                     if now - self._btn_fire[btn] < BTN_COOLDOWN:
                         continue
-                    held = now - (self._btn_down[btn] or now)
+                    held = now - self._btn_down[btn]
                     if held >= BLACK_LONG_SEC:
                         self._reboot()
                     else:
@@ -359,7 +412,7 @@ class AudiobookPlayer:
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
-    def run(self):
+    def run(self) -> None:
         log.info("=== Audiobook player started ===")
         try:
             while True:
@@ -370,11 +423,15 @@ class AudiobookPlayer:
         finally:
             self._shutdown()
 
-    def _shutdown(self):
-        try:
+    def _shutdown(self) -> None:
+        with self._lock:
             self._save_pos()
-        except Exception:
-            pass
+            if self.player is not None:
+                try:
+                    self.player.stop()
+                    self.player.release()
+                except Exception:
+                    pass
         try:
             pygame.quit()
         except Exception:
