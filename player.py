@@ -243,12 +243,15 @@ class AudiobookPlayer:
             log.info("GPIO not available — skipping hardware setup")
             return
 
+        GPIO.cleanup()          # clear any stale event-detect from a previous run
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
 
         pins = [PIN_GREEN, PIN_BLUE, PIN_YELLOW_SIDE, PIN_BLACK_INSIDE, PIN_YELLOW_INSIDE]
         for pin in pins:
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+        time.sleep(0.1)         # let the kernel settle before arming edge detection
 
         callbacks = {
             PIN_GREEN:          self._cb_green,
@@ -258,6 +261,7 @@ class AudiobookPlayer:
             PIN_YELLOW_INSIDE:  self._cb_yellow_inside,
         }
         for pin, cb in callbacks.items():
+            GPIO.remove_event_detect(pin)   # ensure no duplicate listeners
             GPIO.add_event_detect(pin, GPIO.FALLING, callback=cb, bouncetime=DEBOUNCE_MS)
 
         log.info("GPIO configured with internal pull-ups")
