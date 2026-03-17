@@ -7,13 +7,13 @@ Wants=sound.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=radonthusis
+Group=radonthusis
 
-WorkingDirectory=/home/pi
+WorkingDirectory=/home/radonthusis
 
 # Full path to the script — adjust if you clone to a different location
-ExecStart=/usr/bin/python3 /home/pi/audiobookplayerbox/player.py
+ExecStart=/usr/bin/python3 /home/radonthusis/audiobookplayerbox/player.py
 
 # Restart automatically on any failure or unexpected exit
 Restart=always
@@ -27,9 +27,9 @@ StartLimitBurst=10
 StandardOutput=journal
 StandardError=journal
 
-# Environment for audio via ALSA/PulseAudio under the pi user
+# Environment for audio via ALSA/PulseAudio
 Environment=DISPLAY=:0
-Environment=HOME=/home/pi
+Environment=HOME=/home/radonthusis
 
 [Install]
 WantedBy=multi-user.target

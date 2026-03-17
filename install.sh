@@ -7,14 +7,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="audiobook"
 SERVICE_FILE="$SCRIPT_DIR/audiobook.service"
-AUDIOBOOKS_DIR="/home/pi/audiobooks"
-LOG_FILE="/home/pi/audiobook_player.log"
 
 # ── Must run as root ──────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
     echo "Please run as root:  sudo bash install.sh"
     exit 1
 fi
+
+# ── Detect the real user (the one who called sudo) ────────────────────────────
+REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "pi")}"
+REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+AUDIOBOOKS_DIR="$REAL_HOME/audiobooks"
+LOG_FILE="$REAL_HOME/audiobook_player.log"
+
+echo "Installing for user: $REAL_USER (home: $REAL_HOME)"
 
 echo "=== Audiobook Player — Setup ==="
 echo ""
@@ -31,13 +37,13 @@ echo "      Done."
 # ── 2. Audiobooks directory ───────────────────────────────────────────────────
 echo "[2/5] Creating audiobooks directory: $AUDIOBOOKS_DIR"
 mkdir -p "$AUDIOBOOKS_DIR"
-chown pi:pi "$AUDIOBOOKS_DIR"
+chown "$REAL_USER:$REAL_USER" "$AUDIOBOOKS_DIR"
 echo "      Done."
 
 # ── 3. Log file permissions ───────────────────────────────────────────────────
 echo "[3/5] Setting up log file: $LOG_FILE"
 touch "$LOG_FILE"
-chown pi:pi "$LOG_FILE"
+chown "$REAL_USER:$REAL_USER" "$LOG_FILE"
 echo "      Done."
 
 # ── 4. systemd service ────────────────────────────────────────────────────────
@@ -65,7 +71,7 @@ echo " Installation complete!"
 echo ""
 echo " Next steps:"
 echo "   1. Copy your MP3 files to $AUDIOBOOKS_DIR"
-echo "      Example: scp mybook.mp3 pi@raspberrypi:$AUDIOBOOKS_DIR/"
+echo "      Example: scp mybook.mp3 $REAL_USER@raspberrypi:$AUDIOBOOKS_DIR/"
 echo ""
 echo "   2. Check GPIO pin numbers in player.py"
 echo "      (top of file — PIN_GREEN, PIN_BLUE, etc.)"

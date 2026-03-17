@@ -31,9 +31,9 @@ from pathlib import Path
 
 # ─── CONFIGURATION (edit these to match your hardware) ────────────────────────
 
-AUDIOBOOKS_DIR         = "/home/pi/audiobooks"
-STATE_FILE             = "/home/pi/.audiobook_player_state.json"
-LOG_FILE               = "/home/pi/audiobook_player.log"
+AUDIOBOOKS_DIR         = "/home/radonthusis/audiobooks"
+STATE_FILE             = "/home/radonthusis/.audiobook_player_state.json"
+LOG_FILE               = "/home/radonthusis/audiobook_player.log"
 
 POSITION_SAVE_INTERVAL = 10    # seconds between automatic position saves
 
