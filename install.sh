@@ -34,7 +34,8 @@ apt-get install -y --no-install-recommends \
     python3-pygame \
     python3-mutagen \
     vlc \
-    libvlc-dev
+    libvlc-dev \
+    espeak-ng
 # python-vlc (VLC Python bindings) and mutagen are installed via pip because
 # the apt package may lag behind the installed libvlc version.
 pip3 install --quiet --break-system-packages python-vlc mutagen

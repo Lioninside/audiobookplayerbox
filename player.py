@@ -17,12 +17,14 @@ Button mapping (joystick index):
 """
 
 import os
+import re
 import sys
 import time
 import glob
 import logging
 import subprocess
 import threading
+from datetime import datetime
 from pathlib import Path
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -37,6 +39,17 @@ REBOOT_LONG_SEC        = 3.0     # hold duration required to trigger reboot
 DEBOUNCE_SEC           = 0.08    # per-edge debounce window
 BTN_COOLDOWN           = 0.20    # minimum gap between fired actions per button
 LOOP_SLEEP             = 0.010   # main-loop sleep (~100 Hz)
+
+# ── Voice reminder ─────────────────────────────────────────────────────────────
+# Plays a German TTS nudge when the user has been inactive for a long time.
+# Only fires within the active window and only when playback is paused.
+
+REMINDER_INACTIVITY_SEC  = 5 * 3600   # no button press for this long → remind
+REMINDER_COOLDOWN_SEC    = 2 * 3600   # minimum gap between two reminders
+REMINDER_WINDOW_START    = 10 * 60    # earliest reminder: 10:00 (minutes since midnight)
+REMINDER_WINDOW_END      = 19 * 60 + 30  # latest reminder: 19:30
+REMINDER_SPEECH_RATE     = 120        # espeak-ng words per minute (lower = clearer)
+REMINDER_WAV             = "/tmp/audiobook_reminder.wav"
 
 BTN_PLAY   = 0
 BTN_NEXT   = 1
@@ -139,6 +152,16 @@ class AudiobookPlayer:
         self._btn_edge: list[float]             = [0.0]  * nbtn
         self._btn_fire: list[float]             = [0.0]  * nbtn
         self._btn_down: list[float | None]      = [None] * nbtn
+
+        # ── Voice reminder state ──────────────────────────────────────────────
+        # _last_button_press: monotonic timestamp of the most recent button
+        # DOWN. Initialised to now so we don't fire immediately after boot.
+        # _last_reminder: when the last reminder was played (0 = never).
+        # _reminder_player: separate VLC player used only for the WAV clip;
+        # the audiobook player (self.player) is never touched during reminders.
+        self._last_button_press: float                  = time.monotonic()
+        self._last_reminder:     float                  = 0.0
+        self._reminder_player:   vlc.MediaPlayer | None = None
 
         # Autosave daemon thread
         threading.Thread(
@@ -387,6 +410,112 @@ class AudiobookPlayer:
                 f"{result.stderr.strip() or '(no output)'}"
             )
 
+    # ── Voice reminder ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_book_name(path: str) -> str:
+        """Return a TTS-friendly version of a filename for use in the reminder.
+
+        Strips the extension, replaces separators with spaces, and collapses
+        runs of whitespace. Example:
+          'Agatha_Christie_-_Mord_im_Orientexpress.mp3' →
+          'Agatha Christie Mord im Orientexpress'
+        """
+        name = Path(path).stem
+        name = name.replace("_", " ").replace("-", " ")
+        return re.sub(r"\s+", " ", name).strip()
+
+    def _check_reminder(self) -> None:
+        """Call once per main loop tick. Fires a voice reminder when all
+        conditions are met:
+          1. Current wall-clock time is within the active window (10:00–19:30).
+          2. No button has been pressed for REMINDER_INACTIVITY_SEC.
+          3. At least REMINDER_COOLDOWN_SEC has elapsed since the last reminder.
+          4. Playback is currently paused (never interrupt active listening).
+        """
+        # Condition 1 — time window (minutes since midnight for easy comparison)
+        now_wall = datetime.now()
+        now_min  = now_wall.hour * 60 + now_wall.minute
+        if not (REMINDER_WINDOW_START <= now_min <= REMINDER_WINDOW_END):
+            return
+
+        now_mono = time.monotonic()
+
+        # Condition 2 — inactivity threshold
+        if now_mono - self._last_button_press < REMINDER_INACTIVITY_SEC:
+            return
+
+        # Condition 3 — cooldown between reminders
+        if now_mono - self._last_reminder < REMINDER_COOLDOWN_SEC:
+            return
+
+        # Condition 4 — only remind when paused (snapshot under lock)
+        with self._lock:
+            if not self.paused:
+                return
+            book_name = self._clean_book_name(self.books[self.idx])
+
+        self._start_reminder(book_name)
+        self._last_reminder = now_mono
+
+    def _start_reminder(self, book_name: str) -> None:
+        """Generate a German WAV reminder via espeak-ng and start playing it
+        through a dedicated VLC player. The audiobook player is left untouched.
+        """
+        # Stop any reminder that may still be lingering from a previous cycle.
+        self._stop_reminder()
+
+        message = (
+            f"Hallo! Wie wäre es mit einem Hörbuch? "
+            f"Drücke den grünen Knopf zum Starten. "
+            f"Der grüne Knopf ist oben. "
+            f"Du hörst gerade: {book_name}."
+        )
+
+        # Generate WAV. espeak-ng writes directly to the file; if it fails
+        # (e.g. not installed) we log and bail — audio continues unaffected.
+        result = subprocess.run(
+            ["espeak-ng", "-v", "de", "-s", str(REMINDER_SPEECH_RATE),
+             "-w", REMINDER_WAV, message],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log.error(
+                f"espeak-ng failed (rc={result.returncode}): "
+                f"{result.stderr.strip() or '(no output)'}"
+            )
+            return
+
+        # Play through a separate VLC player. Both players come from the same
+        # VLC instance, which manages its own internal audio mixer, so there
+        # is no ALSA device conflict with the paused audiobook player.
+        self._reminder_player = self._vlc.media_player_new()
+        self._reminder_player.set_media(self._vlc.media_new(REMINDER_WAV))
+        self._reminder_player.play()
+        log.info(f"Reminder: '{message[:60]}…'")
+
+    def _poll_reminder(self) -> None:
+        """Check whether the reminder has finished and clean up if so.
+        Called every main loop tick while a reminder player is active.
+        """
+        if self._reminder_player is None:
+            return
+        state = self._reminder_player.get_state()
+        if state in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+            self._stop_reminder()
+
+    def _stop_reminder(self) -> None:
+        """Stop and release the reminder player immediately (e.g. on button press)."""
+        if self._reminder_player is None:
+            return
+        try:
+            self._reminder_player.stop()
+            self._reminder_player.release()
+        except Exception as exc:
+            log.debug(f"reminder player cleanup: {exc}")
+        self._reminder_player = None
+        log.debug("Reminder stopped")
+
     # ── Button polling (~100 Hz) ──────────────────────────────────────────────
 
     def _poll_buttons(self) -> None:
@@ -414,6 +543,14 @@ class AudiobookPlayer:
             if cur == 1:
                 # ── DOWN ──────────────────────────────────────────────────────
                 self._btn_down[btn] = now
+                # Record the interaction time regardless of cooldown state.
+                # This prevents a reminder firing after the user was actively
+                # pressing buttons that happened to be in their cooldown period.
+                self._last_button_press = now
+                # Any button press during a reminder stops it immediately so
+                # the user's intended action is not delayed.
+                if self._reminder_player is not None:
+                    self._stop_reminder()
                 if now - self._btn_fire[btn] < BTN_COOLDOWN:
                     continue
                 if btn == BTN_PLAY:
@@ -447,6 +584,8 @@ class AudiobookPlayer:
         try:
             while True:
                 self._poll_buttons()
+                self._poll_reminder()
+                self._check_reminder()
                 time.sleep(LOOP_SLEEP)
         except KeyboardInterrupt:
             log.info("Interrupted")
@@ -454,6 +593,8 @@ class AudiobookPlayer:
             self._shutdown()
 
     def _shutdown(self) -> None:
+        self._stop_reminder()
+
         # Signal the autosave thread to stop immediately; this prevents a race
         # where autosave writes the .pos file at the same time as _save_pos()
         # below.
