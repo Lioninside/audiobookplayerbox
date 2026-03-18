@@ -2,7 +2,7 @@
 
 > A Raspberry Pi audiobook player built for seniors — large arcade buttons, zero menus, just press play.
 
-Built for a visually impaired mother who loves audiobooks but struggles with smartphones, voice assistants, and the expensive "accessible" devices that are still too complicated. The design goal was the simplicity of a cassette deck from the 1980s: one big button to play, two to skip, done.
+Built for a visually impaired mother who loves audiobooks but struggles with smartphones, voice assistants, and the expensive "accessible" devices that are still too complicated. The design goal was the simplicity of a cassette deck from the 1980s: one big button to play, done.
 
 The enclosure is a wooden box with five colour-coded arcade buttons wired to a USB gamepad controller. A Raspberry Pi inside runs VLC, saves your position automatically, and starts playing again after a reboot — no screen, no menus, no app.
 
@@ -42,9 +42,18 @@ Button indices are zero-based joystick button numbers as reported by pygame. If 
 
 - MP3 files live in `~/audiobooks/`. Drop files there via USB drive, `scp`, or Samba.
 - On every play and every 10 seconds during playback the current position is saved to `~/.audiobook_positions/`. The Pi can be switched off at any time — playback resumes exactly where it stopped.
-- Books are sorted alphabetically. The **Next** button cycles through the list.
-- When a book finishes it resets its position to zero so the next play starts from the beginning.
+- Pressing Play rewinds 5 seconds before resuming so the listener gets context after a break.
+- Books are sorted alphabetically. Next and Previous cycle through the list.
+- When a book finishes its position resets to zero so the next play starts from the beginning.
 - The player starts automatically at boot via systemd and restarts itself after any crash.
+
+### Voice reminder
+
+Between 10:00 and 19:30, if no button has been pressed for 5 hours and playback is paused, the box speaks a short German reminder:
+
+> *„Hallo! Wie wäre es mit einem Hörbuch? Drücke den grünen Knopf zum Starten. Der grüne Knopf ist oben. Du hörst gerade: [book name]."*
+
+The reminder is generated offline by `espeak-ng` (no internet required) and played through the same speaker. Any button press stops it immediately. If the reminder is ignored, it repeats at most once every 2 hours within the active window.
 
 ---
 
@@ -64,7 +73,7 @@ sudo bash install.sh
 ```
 
 This will:
-- Install `vlc`, `python3-pygame`, `python3-mutagen`, and `python-vlc`
+- Install `vlc`, `python3-pygame`, `python3-mutagen`, `python-vlc`, and `espeak-ng`
 - Create `~/audiobooks/`
 - Install and enable the systemd service so the player starts at boot
 
@@ -86,7 +95,7 @@ Run the test script to see which button index your controller reports for each p
 python3 test_buttons.py
 ```
 
-Adjust `BTN_PLAY`, `BTN_FWD`, `BTN_BACK`, `BTN_NEXT`, `BTN_BLK` at the top of `player.py` if needed, then restart the service:
+Adjust `BTN_PLAY`, `BTN_NEXT`, `BTN_PREV`, `BTN_REBOOT`, `BTN_RESET` at the top of `player.py` if needed, then restart the service:
 
 ```bash
 sudo systemctl restart audiobook
@@ -102,9 +111,14 @@ All tuneable constants are at the top of `player.py`:
 |---|---|---|
 | `AUDIOBOOKS_DIR` | `~/audiobooks` | Where MP3 files are scanned |
 | `POS_DIR` | `~/.audiobook_positions` | Where positions are saved |
-| `JUMP_SECONDS` | `60` | Forward / back skip size |
-| `BLACK_LONG_SEC` | `3.0` | Hold duration to trigger reboot |
+| `RESUME_BACK_SEC` | `5` | Seconds rewound on each resume |
+| `REBOOT_LONG_SEC` | `3.0` | Hold duration to trigger reboot |
 | `POSITION_SAVE_INTERVAL` | `10.0` | Autosave interval in seconds |
+| `REMINDER_INACTIVITY_SEC` | `18000` (5 h) | Inactivity before reminder fires |
+| `REMINDER_COOLDOWN_SEC` | `7200` (2 h) | Minimum gap between reminders |
+| `REMINDER_WINDOW_START` | `600` (10:00) | Earliest reminder (minutes since midnight) |
+| `REMINDER_WINDOW_END` | `1170` (19:30) | Latest reminder (minutes since midnight) |
+| `REMINDER_SPEECH_RATE` | `120` | espeak-ng words per minute |
 
 ---
 
@@ -130,7 +144,7 @@ sudo systemctl disable audiobook
 
 - Raspberry Pi OS (Bookworm or Bullseye)
 - Python 3.9+
-- `vlc`, `python-vlc`, `pygame`, `mutagen`
+- `vlc`, `python-vlc`, `pygame`, `mutagen`, `espeak-ng`
 
 All installed automatically by `install.sh`.
 
