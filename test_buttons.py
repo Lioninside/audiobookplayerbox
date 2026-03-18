@@ -1,48 +1,50 @@
 #!/usr/bin/env python3
 """
-Button Pin Finder
-=================
-Run this on the Pi to discover which GPIO pin each button is wired to.
-Press a button — the BCM pin number prints immediately.
+Button Index Finder
+===================
+Run this on the Pi to discover which joystick button index each physical
+button reports. Press a button — the index prints immediately.
 
 Usage:
     python3 test_buttons.py
 
-Once you know all pin numbers, update the PIN_* constants in player.py.
+Once you know all indices, update the BTN_* constants in player.py.
+Press Ctrl+C to quit.
 """
 
+import os
 import time
 
-try:
-    import RPi.GPIO as GPIO
-except ImportError:
-    print("ERROR: RPi.GPIO not found. Run:  sudo apt install python3-rpi.gpio")
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+import pygame
+
+pygame.init()
+pygame.joystick.init()
+
+if pygame.joystick.get_count() == 0:
+    print("ERROR: No joystick/gamepad found. Is the USB controller plugged in?")
     raise SystemExit(1)
 
-# All usable BCM GPIO pins on a Pi
-ALL_PINS = [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]
-
-GPIO.setmode(GPIO.BCM)
-for pin in ALL_PINS:
-    try:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    except Exception:
-        pass  # skip reserved/unavailable pins
-
-print("Press any button — GPIO pin number will be shown.")
+joy = pygame.joystick.Joystick(0)
+joy.init()
+print(f"Controller: '{joy.get_name()}' | {joy.get_numbuttons()} button(s)")
+print("Press any button — index will be shown.")
 print("Press Ctrl+C to quit.\n")
+
+prev = [0] * joy.get_numbuttons()
 
 try:
     while True:
-        for pin in ALL_PINS:
-            try:
-                if GPIO.input(pin) == GPIO.LOW:
-                    print(f"  --> GPIO {pin} (BCM)")
-                    time.sleep(0.4)  # debounce
-            except Exception:
-                pass
+        pygame.event.pump()
+        for i in range(joy.get_numbuttons()):
+            cur = joy.get_button(i)
+            if cur == 1 and prev[i] == 0:
+                print(f"  --> Button index: {i}")
+            prev[i] = cur
         time.sleep(0.02)
 except KeyboardInterrupt:
     print("\nDone.")
 finally:
-    GPIO.cleanup()
+    pygame.quit()
