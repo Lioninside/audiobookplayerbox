@@ -8,11 +8,12 @@ Input:  USB joystick / gamepad (pygame)
 
 Button mapping (joystick index):
   0  Green         Play / Pause
-  1  Yellow outer  +60 s seek
-  2  Blue outer    −60 s seek
-  3  Yellow inner  Next audiobook (starts playing)
-  4  Black inner   Short press (<3 s): reset all saved positions
-                   Long  press (≥3 s): reboot
+                   On resume: rewinds RESUME_BACK_SEC seconds first
+                   so the listener gets context after a break.
+  1  Yellow        Next audiobook (starts playing immediately)
+  2  Blue          Previous audiobook (starts playing immediately)
+  3  Yellow inner  Long press (≥ REBOOT_LONG_SEC s): reboot the Pi
+  4  Black inner   Reset all saved positions
 """
 
 import os
@@ -31,17 +32,17 @@ POS_DIR                = "/home/radonthusis/.audiobook_positions"
 LOG_FILE               = "/home/radonthusis/audiobook_player.log"
 
 POSITION_SAVE_INTERVAL = 10.0    # seconds between autosave during playback
-JUMP_SECONDS           = 60      # seek step size in seconds
-BLACK_LONG_SEC         = 3.0     # hold duration threshold for reboot
+RESUME_BACK_SEC        = 5       # seconds rewound each time play is pressed
+REBOOT_LONG_SEC        = 3.0     # hold duration required to trigger reboot
 DEBOUNCE_SEC           = 0.08    # per-edge debounce window
 BTN_COOLDOWN           = 0.20    # minimum gap between fired actions per button
 LOOP_SLEEP             = 0.010   # main-loop sleep (~100 Hz)
 
-BTN_PLAY = 0
-BTN_FWD  = 1
-BTN_BACK = 2
-BTN_NEXT = 3
-BTN_BLK  = 4
+BTN_PLAY   = 0
+BTN_NEXT   = 1
+BTN_PREV   = 2
+BTN_REBOOT = 3
+BTN_RESET  = 4
 
 # ── Headless SDL — pygame is used only for joystick, not for audio ────────────
 
@@ -343,47 +344,32 @@ class AudiobookPlayer:
 
         with self._lock:
             if self.paused:
+                # Rewind a few seconds before resuming so the listener
+                # gets context after a break — especially useful for
+                # users who may have drifted off mid-sentence.
+                cur_ms = self.player.get_time() or 0
+                tgt_ms = max(0, cur_ms - RESUME_BACK_SEC * 1000)
+                self.player.set_time(tgt_ms)
                 self.player.play()
                 self.paused = False
-                log.info("Play")
+                log.info(f"Play (rewound {RESUME_BACK_SEC}s → {tgt_ms / 1000.0:.1f}s)")
             else:
                 self.player.pause()
                 self.paused = True
                 self._save_pos()
                 log.info("Pause")
 
-    def _seek(self, delta_s: int) -> None:
-        with self._lock:
-            # Seeking on an ended player is a silent no-op in VLC and would
-            # leave self.paused in a wrong state.
-            if self.player is None or self.ended:
-                return
-            cur_ms = self.player.get_time() or 0
-            max_ms = (
-                int(self.length_s * 1000) if self.length_s > 0
-                else (self.player.get_length() or 0)
-            )
-            tgt_ms = max(0, cur_ms + delta_s * 1000)
-            if max_ms > 0:
-                tgt_ms = min(tgt_ms, max(0, max_ms - 250))
-            was_playing = (self.player.get_state() == vlc.State.Playing)
-            self.player.set_time(tgt_ms)
-            self._save_pos()
-            # After set_time, VLC may briefly stall; restore the prior state.
-            if was_playing:
-                self.player.play()
-                self.paused = False
-            else:
-                self.player.pause()
-                self.paused = True
-            log.info(f"Seek {delta_s:+d}s → {tgt_ms / 1000.0:.1f}s")
-
     def _next_book(self) -> None:
         with self._lock:
-            was_playing = not self.paused
             idx = (self.idx + 1) % len(self.books)
-        self._load_book(idx, start_paused=not was_playing)
+        self._load_book(idx, start_paused=False)
         log.info("Next book")
+
+    def _prev_book(self) -> None:
+        with self._lock:
+            idx = (self.idx - 1) % len(self.books)
+        self._load_book(idx, start_paused=False)
+        log.info("Previous book")
 
     def _reboot(self) -> None:
         log.info("Rebooting…")
@@ -431,31 +417,28 @@ class AudiobookPlayer:
                 if now - self._btn_fire[btn] < BTN_COOLDOWN:
                     continue
                 if btn == BTN_PLAY:
-                    self._toggle_play();        self._btn_fire[btn] = now
-                elif btn == BTN_FWD:
-                    self._seek(+JUMP_SECONDS);  self._btn_fire[btn] = now
-                elif btn == BTN_BACK:
-                    self._seek(-JUMP_SECONDS);  self._btn_fire[btn] = now
+                    self._toggle_play();  self._btn_fire[btn] = now
                 elif btn == BTN_NEXT:
-                    self._next_book();          self._btn_fire[btn] = now
-                # BTN_BLK: decision deferred to release
+                    self._next_book();    self._btn_fire[btn] = now
+                elif btn == BTN_PREV:
+                    self._prev_book();    self._btn_fire[btn] = now
+                elif btn == BTN_RESET:
+                    self._reset_all_positions(); self._btn_fire[btn] = now
+                # BTN_REBOOT: decision deferred to release (long-press guard)
 
             else:
                 # ── UP ────────────────────────────────────────────────────────
-                if btn == BTN_BLK:
+                if btn == BTN_REBOOT:
                     if now - self._btn_fire[btn] < BTN_COOLDOWN:
                         continue
                     down_t = self._btn_down[btn]
                     if down_t is None:
-                        # UP without a matching DOWN (e.g. Pi booted while
-                        # button was held). Ignore to prevent a false reboot.
+                        # UP without a matching DOWN (Pi booted while button
+                        # was held). Ignore to prevent a false reboot.
                         continue
-                    held = now - down_t
-                    if held >= BLACK_LONG_SEC:
+                    if now - down_t >= REBOOT_LONG_SEC:
                         self._reboot()
-                    else:
-                        self._reset_all_positions()
-                    self._btn_fire[btn] = now
+                        self._btn_fire[btn] = now
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 

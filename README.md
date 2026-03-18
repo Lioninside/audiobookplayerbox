@@ -28,12 +28,11 @@ The USB controller is plug-and-play on Raspberry Pi OS — no drivers needed.
 
 | Button | Colour | Action |
 |---|---|---|
-| 0 | Green (large, centre) | **Play / Pause** |
-| 1 | Yellow outer | Skip forward 60 seconds |
-| 2 | Blue outer | Skip back 60 seconds |
-| 3 | Yellow inner | Next audiobook (starts playing immediately) |
-| 4 | Black inner | Short press (< 3 s): reset all saved positions |
-| 4 | Black inner | Long press (≥ 3 s): reboot the Pi |
+| 0 | Green (large, centre) | **Play / Pause** — on resume, rewinds 5 seconds for context |
+| 1 | Yellow | Next audiobook (starts playing immediately) |
+| 2 | Blue | Previous audiobook (starts playing immediately) |
+| 3 | Yellow inner | Long press (≥ 3 s): reboot the Pi |
+| 4 | Black inner | Reset all saved positions |
 
 Button indices are zero-based joystick button numbers as reported by pygame. If your controller has a different mapping, adjust the `BTN_*` constants at the top of `player.py`.
 
