@@ -135,17 +135,8 @@ class AudiobookPlayer:
         # Joystick — pygame initialised only for input, not for audio
         pygame.init()
         pygame.joystick.init()
-        # At boot the USB controller may not be enumerated yet — retry for up
-        # to 30 seconds before giving up so the service wins the race.
-        for _attempt in range(30):
-            pygame.joystick.quit()
-            pygame.joystick.init()
-            if pygame.joystick.get_count() > 0:
-                break
-            log.warning("No joystick found, retrying in 1 s…")
-            time.sleep(1)
-        else:
-            log.error("No joystick/controller found after 30 s — giving up")
+        if pygame.joystick.get_count() == 0:
+            log.error("No joystick/controller found")
             sys.exit(1)
         self.joy = pygame.joystick.Joystick(0)
         self.joy.init()
