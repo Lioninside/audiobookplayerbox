@@ -103,6 +103,25 @@ sudo systemctl restart audiobook
 
 ---
 
+## Joystick / gamepad detection
+
+pygame scans all USB HID devices and may expose keyboards, USB hubs, or other peripherals as joysticks with an unusually high button count (20+). These devices never fire real button events and must not be mistaken for the arcade controller.
+
+The player handles this automatically: it skips any device that reports more than 16 buttons and uses the first device that reports 16 or fewer. Standard arcade zero-delay encoders report 8–12 buttons, so they are selected correctly. You can confirm which device was chosen in the log at startup:
+
+```
+Controller: 'USB Gamepad' | 8 button(s)
+```
+
+If you see the line `Skipping '...' (N buttons) — not a gamepad` followed by no controller being found, the arcade encoder is either not plugged in or it also reports more than 16 buttons (unusual but possible with some encoders). In that case:
+
+1. Run `python3 test_buttons.py` with only the arcade controller connected to identify its exact name and button count.
+2. Adjust the `<= 16` threshold in `player.py` if your encoder genuinely uses more than 16 buttons.
+
+If pygame picks the wrong device (e.g. a keyboard before the encoder), unplug all non-gamepad USB peripherals and restart the service, or re-order the USB connections.
+
+---
+
 ## Configuration
 
 All tuneable constants are at the top of `player.py`:
