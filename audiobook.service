@@ -2,7 +2,7 @@
 Description=Audiobook Player (Arcade Box)
 Documentation=https://github.com/Lioninside/audiobookplayerbox
 # Start after audio and basic networking are ready
-After=sound.target multi-user.target
+After=sound.target multi-user.target local-fs.target
 Wants=sound.target
 
 [Service]
