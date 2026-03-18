@@ -22,6 +22,7 @@ import sys
 import time
 import glob
 import logging
+import logging.handlers
 import subprocess
 import threading
 from datetime import datetime
@@ -78,7 +79,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        logging.handlers.RotatingFileHandler(
+            LOG_FILE, maxBytes=1_000_000, backupCount=3
+        ),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -308,16 +311,29 @@ class AudiobookPlayer:
 
             # Wait up to 2 s for the player to become ready.
             deadline = time.monotonic() + 2.0
+            ready = False
             while time.monotonic() < deadline:
                 state = self.player.get_state()
                 if state in (vlc.State.Playing, vlc.State.Paused):
+                    ready = True
                     break
                 if state == vlc.State.Error:
                     log.error(f"VLC error opening: {path}")
-                    return
+                    break
                 time.sleep(0.05)
             else:
                 log.error(f"VLC timed out opening: {path}")
+
+            if not ready:
+                # Release the broken player so it doesn't leak and doesn't get
+                # used by _toggle_play / autosave in a broken state.
+                try:
+                    self.player.stop()
+                    self.player.release()
+                except Exception:
+                    pass
+                self.player = None
+                self.paused = True   # safe default: won't autosave, won't auto-play
                 return
 
             if last_s > 0:
@@ -400,16 +416,16 @@ class AudiobookPlayer:
                 log.info("Pause")
 
     def _next_book(self) -> None:
+        log.info("Next book")
         with self._lock:
             idx = (self.idx + 1) % len(self.books)
         self._load_book(idx, start_paused=False)
-        log.info("Next book")
 
     def _prev_book(self) -> None:
+        log.info("Previous book")
         with self._lock:
             idx = (self.idx - 1) % len(self.books)
         self._load_book(idx, start_paused=False)
-        log.info("Previous book")
 
     def _reboot(self) -> None:
         log.info("Rebooting…")
