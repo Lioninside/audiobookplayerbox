@@ -19,9 +19,12 @@ ExecStart=/usr/bin/python3 /home/radonthusis/audiobookplayerbox/player.py
 Restart=always
 RestartSec=3
 
-# Give the audio hardware a moment after a crash before restarting
-StartLimitIntervalSec=60
-StartLimitBurst=10
+# Disable systemd's restart rate-limiting entirely.
+# With the default (burst=5 in 10 s), systemd stops retrying after a few
+# rapid crashes and the box goes permanently silent. For an always-on
+# appliance that must recover from any failure, unlimited retries are correct.
+# RestartSec=3 already prevents a tight CPU-burning crash loop.
+StartLimitIntervalSec=0
 
 # Forward stdout/stderr to the system journal (viewable with: journalctl -u audiobook -f)
 StandardOutput=journal

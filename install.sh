@@ -30,8 +30,14 @@ echo "[1/5] Installing system packages…"
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     python3 \
+    python3-pip \
     python3-pygame \
-    python3-rpi.gpio
+    python3-mutagen \
+    vlc \
+    libvlc-dev
+# python-vlc (VLC Python bindings) and mutagen are installed via pip because
+# the apt package may lag behind the installed libvlc version.
+pip3 install --quiet --break-system-packages python-vlc mutagen
 echo "      Done."
 
 # ── 2. Audiobooks directory ───────────────────────────────────────────────────
