@@ -172,12 +172,14 @@ class AudiobookPlayer:
         # _last_button_press: monotonic timestamp of the most recent button
         # DOWN. Initialised to now so we don't fire immediately after boot.
         # _last_reminder: when the last reminder was played (0 = never).
-        # _reminder_player: separate VLC player used only for the WAV clip;
-        # the audiobook player (self.player) is never touched during reminders.
-        # _reminder_cancelled: set True when a button press cancels a reminder
-        # that is still being generated in the background thread.
+        # _reminder_lock: guards _reminder_player and _reminder_cancelled.
+        #   Both the generation thread and the main thread read/write these
+        #   fields; without a lock the generation thread can assign
+        #   _reminder_player = rp after _stop_reminder() already saw it as
+        #   None, leaving a playing VLC handle that is never released.
         self._last_button_press: float                  = time.monotonic()
         self._last_reminder:     float                  = 0.0
+        self._reminder_lock:     threading.Lock         = threading.Lock()
         self._reminder_player:   vlc.MediaPlayer | None = None
         self._reminder_cancelled: bool                  = False
 
@@ -281,14 +283,24 @@ class AudiobookPlayer:
                     log.warning(f"player.release() failed (VLC handle may leak): {exc}")
                 self.player = None
 
+            # Anchor the intended book by path before rescanning. Without
+            # this, adding or removing a file changes the sort order and
+            # index % new_len can silently land on a different book.
+            target_path = self.books[index % len(self.books)]
+
             # Refresh book list in case files changed on disk
             self.books = self._scan_books()
             if not self.books:
                 log.error("No books found on disk")
                 return
 
-            self.idx    = index % len(self.books)
-            path        = self.books[self.idx]
+            # Prefer the exact file we intended; fall back to the nearest
+            # index if it was deleted between the button press and now.
+            try:
+                self.idx = self.books.index(target_path)
+            except ValueError:
+                self.idx = index % len(self.books)
+            path = self.books[self.idx]
             last_s      = self._load_pos(path)
             self.ended  = False
             self.paused = start_paused
@@ -433,10 +445,15 @@ class AudiobookPlayer:
             self._save_pos()
         # subprocess.run with a list avoids shell interpretation and gives a
         # clean returncode; stderr is captured for logging if the command fails.
-        result = subprocess.run(
-            ["sudo", "/sbin/reboot"],
-            capture_output=True, text=True
-        )
+        # timeout=5 prevents hanging forever if sudo misconfiguration stalls.
+        try:
+            result = subprocess.run(
+                ["sudo", "/sbin/reboot"],
+                capture_output=True, text=True, timeout=5
+            )
+        except subprocess.TimeoutExpired:
+            log.error("Reboot command timed out after 5 s")
+            return
         if result.returncode != 0:
             log.error(
                 f"Reboot failed (rc={result.returncode}): "
@@ -507,7 +524,10 @@ class AudiobookPlayer:
         )
         log.info(f"Reminder: '{message[:60]}…'")
 
-        self._reminder_cancelled = False
+        # Reset the cancel flag inside the lock so the generation thread
+        # cannot see a stale True from a just-completed _stop_reminder().
+        with self._reminder_lock:
+            self._reminder_cancelled = False
 
         def _generate_and_play() -> None:
             # Generate WAV. espeak-ng writes directly to the file; if it fails
@@ -524,22 +544,23 @@ class AudiobookPlayer:
                 )
                 return
 
-            # Only start playing if no button was pressed while we were
-            # generating the WAV. The boolean flag is written by the main
-            # thread and read here; CPython's GIL makes this safe.
-            if self._reminder_cancelled:
-                return
-
-            # Play through a separate VLC player. Both players come from the
-            # same VLC instance, which manages its own internal audio mixer,
-            # so there is no ALSA device conflict with the paused audiobook
-            # player.
-            rp = self._vlc.media_player_new()
-            m  = self._vlc.media_new(REMINDER_WAV)
-            rp.set_media(m)
-            m.release()
-            rp.play()
-            self._reminder_player = rp
+            # The check-then-assign must be atomic: if _stop_reminder() runs
+            # between the check and the assignment we would store a player
+            # that is never cleaned up. Hold _reminder_lock for the entire
+            # critical section.
+            with self._reminder_lock:
+                if self._reminder_cancelled:
+                    return
+                # Play through a separate VLC player. Both players come from
+                # the same VLC instance, which manages its own internal audio
+                # mixer, so there is no ALSA device conflict with the paused
+                # audiobook player.
+                rp = self._vlc.media_player_new()
+                m  = self._vlc.media_new(REMINDER_WAV)
+                rp.set_media(m)
+                m.release()
+                rp.play()
+                self._reminder_player = rp
 
         threading.Thread(
             target=_generate_and_play, daemon=True, name="reminder-gen"
@@ -549,26 +570,29 @@ class AudiobookPlayer:
         """Check whether the reminder has finished and clean up if so.
         Called every main loop tick while a reminder player is active.
         """
-        if self._reminder_player is None:
+        with self._reminder_lock:
+            rp = self._reminder_player
+        if rp is None:
             return
-        state = self._reminder_player.get_state()
-        if state in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+        if rp.get_state() in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
             self._stop_reminder()
 
     def _stop_reminder(self) -> None:
         """Stop and release the reminder player immediately (e.g. on button press).
-        Also sets _reminder_cancelled so a background generation thread won't
-        start playing a WAV that was generated after the cancel.
+        Sets _reminder_cancelled under the lock so the generation thread cannot
+        slip a new player assignment past the cancellation check.
         """
-        self._reminder_cancelled = True
-        if self._reminder_player is None:
+        with self._reminder_lock:
+            self._reminder_cancelled = True
+            rp = self._reminder_player
+            self._reminder_player = None
+        if rp is None:
             return
         try:
-            self._reminder_player.stop()
-            self._reminder_player.release()
+            rp.stop()
+            rp.release()
         except Exception as exc:
             log.debug(f"reminder player cleanup: {exc}")
-        self._reminder_player = None
         log.debug("Reminder stopped")
 
     # ── Button polling (~100 Hz) ──────────────────────────────────────────────
@@ -578,7 +602,11 @@ class AudiobookPlayer:
         # With time.time(), an NTP correction of a few seconds at startup
         # could make a held BTN_BLK appear long-pressed and trigger a reboot.
         now = time.monotonic()
-        pygame.event.pump()
+        try:
+            pygame.event.pump()
+        except Exception as exc:
+            log.warning(f"pygame.event.pump() failed: {exc}")
+            return
 
         for btn in range(self.joy.get_numbuttons()):
             cur  = self.joy.get_button(btn)
@@ -604,8 +632,7 @@ class AudiobookPlayer:
                 self._last_button_press = now
                 # Any button press during a reminder stops it immediately so
                 # the user's intended action is not delayed.
-                if self._reminder_player is not None:
-                    self._stop_reminder()
+                self._stop_reminder()
                 if now - self._btn_fire[btn] < BTN_COOLDOWN:
                     continue
                 if btn == BTN_PLAY:
