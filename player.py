@@ -171,9 +171,12 @@ class AudiobookPlayer:
         # _last_reminder: when the last reminder was played (0 = never).
         # _reminder_player: separate VLC player used only for the WAV clip;
         # the audiobook player (self.player) is never touched during reminders.
+        # _reminder_cancelled: set True when a button press cancels a reminder
+        # that is still being generated in the background thread.
         self._last_button_press: float                  = time.monotonic()
         self._last_reminder:     float                  = 0.0
         self._reminder_player:   vlc.MediaPlayer | None = None
+        self._reminder_cancelled: bool                  = False
 
         # Autosave daemon thread
         threading.Thread(
@@ -293,6 +296,7 @@ class AudiobookPlayer:
             m.add_option(":input-fast-seek")
             m.add_option(":file-caching=3000")
             self.player.set_media(m)
+            m.release()  # MediaPlayer holds its own reference; release ours
 
             em = self.player.event_manager()
             em.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end)
@@ -354,9 +358,10 @@ class AudiobookPlayer:
                 atomic_write(self._pos_file(self.books[self.idx]), "0.000")
             except OSError as exc:
                 log.error(f"Could not reset position on end: {exc}")
+            finished_name = Path(self.books[self.idx]).name
             self.ended  = True
             self.paused = False
-        log.info(f"Finished: {Path(self.books[self.idx]).name}")
+        log.info(f"Finished: {finished_name}")
 
     # ── Playback actions (called from main thread only) ───────────────────────
 
@@ -471,7 +476,8 @@ class AudiobookPlayer:
         self._last_reminder = now_mono
 
     def _start_reminder(self, book_name: str) -> None:
-        """Generate a German WAV reminder via espeak-ng and start playing it
+        """Generate a German WAV reminder via espeak-ng (in a background thread
+        so the main button-polling loop is never blocked) and then play it
         through a dedicated VLC player. The audiobook player is left untouched.
         """
         # Stop any reminder that may still be lingering from a previous cycle.
@@ -483,28 +489,45 @@ class AudiobookPlayer:
             f"Der grüne Knopf ist oben. "
             f"Du hörst gerade: {book_name}."
         )
-
-        # Generate WAV. espeak-ng writes directly to the file; if it fails
-        # (e.g. not installed) we log and bail — audio continues unaffected.
-        result = subprocess.run(
-            ["espeak-ng", "-v", "de", "-s", str(REMINDER_SPEECH_RATE),
-             "-w", REMINDER_WAV, message],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            log.error(
-                f"espeak-ng failed (rc={result.returncode}): "
-                f"{result.stderr.strip() or '(no output)'}"
-            )
-            return
-
-        # Play through a separate VLC player. Both players come from the same
-        # VLC instance, which manages its own internal audio mixer, so there
-        # is no ALSA device conflict with the paused audiobook player.
-        self._reminder_player = self._vlc.media_player_new()
-        self._reminder_player.set_media(self._vlc.media_new(REMINDER_WAV))
-        self._reminder_player.play()
         log.info(f"Reminder: '{message[:60]}…'")
+
+        self._reminder_cancelled = False
+
+        def _generate_and_play() -> None:
+            # Generate WAV. espeak-ng writes directly to the file; if it fails
+            # (e.g. not installed) we log and bail — audio continues unaffected.
+            result = subprocess.run(
+                ["espeak-ng", "-v", "de", "-s", str(REMINDER_SPEECH_RATE),
+                 "-w", REMINDER_WAV, message],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                log.error(
+                    f"espeak-ng failed (rc={result.returncode}): "
+                    f"{result.stderr.strip() or '(no output)'}"
+                )
+                return
+
+            # Only start playing if no button was pressed while we were
+            # generating the WAV. The boolean flag is written by the main
+            # thread and read here; CPython's GIL makes this safe.
+            if self._reminder_cancelled:
+                return
+
+            # Play through a separate VLC player. Both players come from the
+            # same VLC instance, which manages its own internal audio mixer,
+            # so there is no ALSA device conflict with the paused audiobook
+            # player.
+            rp = self._vlc.media_player_new()
+            m  = self._vlc.media_new(REMINDER_WAV)
+            rp.set_media(m)
+            m.release()
+            rp.play()
+            self._reminder_player = rp
+
+        threading.Thread(
+            target=_generate_and_play, daemon=True, name="reminder-gen"
+        ).start()
 
     def _poll_reminder(self) -> None:
         """Check whether the reminder has finished and clean up if so.
@@ -517,7 +540,11 @@ class AudiobookPlayer:
             self._stop_reminder()
 
     def _stop_reminder(self) -> None:
-        """Stop and release the reminder player immediately (e.g. on button press)."""
+        """Stop and release the reminder player immediately (e.g. on button press).
+        Also sets _reminder_cancelled so a background generation thread won't
+        start playing a WAV that was generated after the cancel.
+        """
+        self._reminder_cancelled = True
         if self._reminder_player is None:
             return
         try:
