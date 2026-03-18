@@ -138,8 +138,20 @@ class AudiobookPlayer:
         if pygame.joystick.get_count() == 0:
             log.error("No joystick/controller found")
             sys.exit(1)
-        self.joy = pygame.joystick.Joystick(0)
-        self.joy.init()
+        # Pick the first joystick with ≤16 buttons — skips spurious HID devices
+        # (keyboards, hubs) that pygame sometimes exposes as joysticks with 20+
+        # buttons but never fire any events.
+        self.joy = None
+        for i in range(pygame.joystick.get_count()):
+            js = pygame.joystick.Joystick(i)
+            js.init()
+            if js.get_numbuttons() <= 16:
+                self.joy = js
+                break
+            log.info(f"Skipping '{js.get_name()}' ({js.get_numbuttons()} buttons) — not a gamepad")
+        if self.joy is None:
+            log.error("No suitable gamepad found (all devices have >16 buttons)")
+            sys.exit(1)
         nbtn = self.joy.get_numbuttons()
         log.info(f"Controller: '{self.joy.get_name()}' | {nbtn} button(s)")
 
