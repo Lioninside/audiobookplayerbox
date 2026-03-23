@@ -1,0 +1,118 @@
+{
+  "meta": {
+    "type": "development",
+    "project": "Window Watch",
+    "version": "v1",
+    "created": "2026-03-23",
+    "lastSession": "2026-03-23"
+  },
+  "changelog": [
+    {
+      "version": "v1",
+      "date": "2026-03-23",
+      "summary": "Project basis defined; core decisions on login, POI display, alert timing, hosting, and tooling; freemium model discussed; key metrics and open items identified"
+    }
+  ],
+  "basis": {
+    "whatIsIt": "Mobile app providing real-time GPS-based alerts for scenic points of interest visible from train windows during rail journeys",
+    "description": "GPS + timetable hybrid system that alerts passengers 1 minute before POIs become visible, indicating which side of the train to look and the visibility duration",
+    "problem": "AI can create itineraries but cannot deliver real-time, location-aware micro-moment alerts. Passengers miss scenic views because they don't know when or where to look during train journeys",
+    "solution": "Hybrid GPS + schedule tracking with pre-journey POI selection, during-journey alerts (1 min before), and post-journey summary showing seen vs missed highlights"
+  },
+  "market": {
+    "customerSegments": "",
+    "functionalJob": "Never miss a scenic view during a train journey; know exactly when and where to look",
+    "whyBought": "",
+    "emotionalJob": "Avoid regret of missing highlights; feel like an insider who knows the route",
+    "socialJob": "",
+    "howBought": "",
+    "channels": "",
+    "priceVolume": "MVP completely free. Post-MVP freemium discussed: 3 journeys/month free, CHF 4.90/month unlimited — not finalized"
+  },
+  "positioning": {
+    "uvp": "Real-time location-aware alerts AI chatbots cannot deliver — solves the 'I didn't know I needed to ask' problem",
+    "unfairAdvantage": "Precise timing data from GPS-validated test rides; hyper-local POI database; hybrid GPS+timetable compensates for delays and tunnel signal loss",
+    "insight": "",
+    "competitors": "Travel blogs, YouTube POV videos, guidebooks (all static, not real-time); Google Maps photo spots (not train-specific)",
+    "differentiator": "Only solution providing real-time, direction-aware, delay-compensated alerts synchronized to exact train position"
+  },
+  "economics": {
+    "revenueStreams": "MVP: none (completely free). Post-MVP: freemium subscription discussed (CHF 4.90/month unlimited) but not implemented in v1",
+    "costStructure": "Stock photos CHF 600–1200 (60 images @ 1–3 per POI); test rides CHF ~1500 (5 rides estimated); infrastructure $20–40/month (Railway.app); developer time (Claude Code assisted, exact cost not specified)",
+    "keyMetrics": "Discussed but not finalized: journey completion rate, POI detection accuracy (target 85%), alert timing precision, battery consumption (target <30% for 8h journey)"
+  },
+  "timeline": {
+    "phase1": "First GPS validation test ride: 2026-03-15. Development estimate ~10 weeks mentioned but not formally committed",
+    "phase2": "",
+    "phase3": ""
+  },
+  "decisions": {
+    "do": [
+      {
+        "text": "Mandatory user login required (email/password); Apple/Google Sign-In excluded",
+        "reason": "Required for POI preference storage, journey history tracking, and future freemium model enforcement; Apple/Google Sign-In rejected to reduce complexity",
+        "date": "2026-03-23"
+      },
+      {
+        "text": "All POIs displayed immediately, top 10 pre-selected by default",
+        "reason": "User requested all POIs visible immediately; top 10 pre-selected to avoid overwhelming new users while allowing full control",
+        "date": "2026-03-23"
+      },
+      {
+        "text": "Alert lead time set to 1 minute; make user-configurable later (30s / 1min / 2min options)",
+        "reason": "User feedback that 2 minutes is too long",
+        "date": "2026-03-23"
+      },
+      {
+        "text": "Host on Railway.app",
+        "reason": "Auto-deployment from GitHub, EU region for GDPR, PostgreSQL+PostGIS support, cheaper than AWS for MVP ($20–40/month), simpler than full AWS setup",
+        "date": "2026-03-23"
+      },
+      {
+        "text": "Use GitHub Issues / GitHub Projects for project management",
+        "reason": "Zero setup time, perfect integration with Claude Code workflow, version control via Git, sufficient for solo developer MVP; can migrate to Airtable later if team grows",
+        "date": "2026-03-23"
+      }
+    ],
+    "dont": [
+      {
+        "text": "No guest mode",
+        "reason": "After discussion, user confirmed login must be mandatory for data persistence and future monetization tracking",
+        "date": "2026-03-23"
+      },
+      {
+        "text": "No offline mode",
+        "reason": "User confirmed internet connection required; adds complexity for marginal benefit given POIs cache after first download",
+        "date": "2026-03-23"
+      }
+    ]
+  },
+  "openItems": [
+    {
+      "text": "[content truncated in source — recover from session chat]",
+      "status": "in discussion",
+      "date": "2026-03-23"
+    },
+    {
+      "text": "[content truncated in source — recover from session chat]",
+      "status": "unresolved critical risk",
+      "date": "2026-03-23"
+    }
+  ],
+  "sessions": [
+    {
+      "title": "Session 1 — Project foundation",
+      "date": "2026-03-23",
+      "chatLink": "",
+      "summary": "Defined the core concept, problem, and solution. Made foundational decisions on authentication, POI display defaults, alert timing, hosting (Railway.app), and project tooling. Discussed freemium pricing model and key success metrics without finalising them.",
+      "ideas": [
+        { "text": "Guest mode (no login)", "tag": "drop", "reason": "Conflicts with data persistence and monetization tracking requirements" },
+        { "text": "Offline mode", "tag": "drop", "reason": "Too complex for marginal benefit; POIs cache after first download" },
+        { "text": "User-configurable alert timing (30s/1min/2min)", "tag": "keep", "reason": "Planned for post-MVP; 1 minute set as default for now" },
+        { "text": "Freemium model (3 free journeys/month, CHF 4.90/month unlimited)", "tag": "unsure", "reason": "Discussed but not finalized; not implemented in v1" }
+      ]
+    }
+  ],
+  "_aiContent": {},
+  "_changeHistory": {}
+}
