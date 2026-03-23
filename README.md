@@ -53,7 +53,7 @@ Between 10:00 and 19:30, if no button has been pressed for 5 hours and playback 
 
 > *„Hallo! Wie wäre es mit einem Hörbuch? Drücke den grünen Knopf zum Starten. Der grüne Knopf ist oben. Du hörst gerade: [book name]."*
 
-The reminder is generated offline by `espeak-ng` (no internet required) and played through the same speaker. Any button press stops it immediately. If the reminder is ignored, it repeats at most once every 2 hours within the active window.
+The reminder is generated offline by `espeak-ng` (no internet required) and played through the same speaker. Any button press stops it immediately. If the reminder is ignored, it repeats once every 5 hours within the active window.
 
 ---
 
@@ -81,7 +81,7 @@ This will:
 
 ```bash
 # From your computer:
-scp mybook.mp3 radonthusis@raspberrypi:~/audiobooks/
+scp mybook.mp3 pi@raspberrypi:~/audiobooks/
 
 # Or copy from a USB drive:
 cp /media/usb/*.mp3 ~/audiobooks/
